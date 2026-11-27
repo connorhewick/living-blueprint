@@ -1,6 +1,7 @@
 """python3 -m unittest discover -s tests"""
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -541,6 +542,62 @@ class Rendering(Repo):
         text = bp.render_markdown(self.load(DESIGN))
         self.assertIn("**[PROPOSED]**", text)
         self.assertIn("```mermaid", text)
+
+
+class AWriteThatFails(Repo):
+    """A write either lands whole or leaves the old file as it was."""
+
+    SURROGATE = "x\ud800"  # loads from JSON, cannot be saved as UTF-8
+
+    def leftovers(self):
+        return [p for p in self.root.rglob("*.tmp")]
+
+    def spoil_the_design(self):
+        design = json.loads((FIXTURE / DESIGN).read_text())
+        design["sections"][1]["blocks"][1]["nodes"][1]["title"] = self.SURROGATE
+        (self.root / DESIGN).write_text(json.dumps(design))
+
+    def test_approve_and_integrate_keep_the_old_file(self):
+        bp.write_json(self.root / ARCH, self.doc)
+        for args, target in ((("approve", DESIGN), DESIGN), (("integrate", ARCH, DESIGN), ARCH)):
+            with self.subTest(command=args[0]):
+                self.spoil_the_design()
+                before = (self.root / target).read_bytes()
+                result = cli(self.root, *args)
+                self.assertEqual((self.root / target).read_bytes(), before)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_render_writes_nothing_when_one_copy_cannot_be_saved(self):
+        page = (self.root / DESIGN).with_suffix(".html")
+        page.write_text("old page")
+        with mock.patch.object(bp, "render_markdown", return_value=self.SURROGATE), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(bp.main(["--repo", str(self.root), "render", DESIGN, "--markdown"]), 2)
+        self.assertEqual(page.read_text(), "old page")
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_rename_that_fails_keeps_the_old_file_and_no_temporary_one(self):
+        target = self.root / ARCH
+        before = target.read_bytes()
+        with mock.patch.object(bp.os, "replace", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                bp.safe_write(target, "new")
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_rewritten_file_keeps_its_permissions_and_a_new_one_follows_the_umask(self):
+        kept = self.root / ARCH
+        kept.chmod(0o600)
+        bp.safe_write(kept, "new")
+        self.assertEqual(kept.stat().st_mode & 0o777, 0o600)
+        mask = os.umask(0o027)
+        try:
+            bp.safe_write(self.root / "fresh.md", "new")
+        finally:
+            os.umask(mask)
+        self.assertEqual((self.root / "fresh.md").stat().st_mode & 0o777, 0o640)
 
 
 class PullRequest(Repo):

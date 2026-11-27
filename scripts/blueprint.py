@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import unicodedata
 from pathlib import Path, PurePosixPath
 
@@ -114,15 +115,39 @@ def refuse_links(path: Path, below: Path | None = None) -> None:
             raise BlueprintError(f"{step}: is a symlink; refusing to write through it")
 
 
+def encoded(path: Path, text: str) -> bytes:
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise BlueprintError(
+            f"{path}: cannot be saved as UTF-8 ({error.reason} at character {error.start}); nothing was written"
+        ) from None
+
+
 def safe_write(path: Path, text: str, below: Path | None = None) -> None:
     refuse_links(path, below)
     if path.exists() and not path.is_file():
         raise BlueprintError(f"{path}: is not a regular file")
+    data = encoded(path, text)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # O_NOFOLLOW closes the gap after the check above; Windows does not have it
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    with os.fdopen(os.open(path, flags, 0o666), "w", encoding="utf-8") as handle:
-        handle.write(text)
+    if path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode)
+    else:
+        mask = os.umask(0)
+        os.umask(mask)
+        mode = 0o666 & ~mask
+    # A new file, then a rename: a write that fails never leaves the old file cut short, and a link
+    # that appears at `path` after the check is replaced, not written through. mkstemp opens with
+    # O_EXCL, so nothing planted at the temporary name is followed.
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def docs_dir(root: Path, override: str | None = None) -> tuple[str, str]:
@@ -1190,8 +1215,9 @@ def main(argv: list[str] | None = None) -> int:
                 outputs.append((path.with_suffix(".md"), render_markdown(doc), root))
             if args.fragment:  # may be anywhere the caller names, such as a scratch folder
                 outputs.append((Path(args.fragment), render_html(doc, fragment=True), None))
-            for target, _, below in outputs:
+            for target, text, below in outputs:
                 refuse_links(target, below)  # all of them, before the first is written
+                encoded(target, text)
             for target, text, below in outputs:
                 safe_write(target, text, below)
             written = [target for target, _, _ in outputs]
