@@ -63,18 +63,25 @@ to a design with its implementation.
 - Graphs become flowcharts and swimlanes become sequence diagrams. They are not laid out like the
   page, and notes and tables stay in the files.
 - A hook refuses to open a pull request, or to rewrite its body, unless the body holds the current
-  section. It covers `gh pr create`, `gh pr edit` on the current or a named branch, and GitHub
-  connector tools that create or update a pull request. **It does not check `gh pr edit <number>`
-  or `<url>`**, because it cannot tell which branch that is. It also misses `gh` inside quotes,
-  backticks, `gh api` or a script. Connector checks compare the branches of the folder the session
-  is in. Connector tool names were not available to test against, so that path is matched
-  by name and tested only with made-up calls.
+  section. It covers `gh pr create`, `gh pr edit` that sets a body, and GitHub connector tools that
+  create or update a pull request. The section counts only from a body file or a quoted heredoc.
+  **Put directly in `--body` or an unquoted heredoc it is refused, because the shell would run
+  parts of it.**
+- For `gh pr edit <number>` or `<url>`, and a connector update that names only a number, the hook
+  runs `gh pr view` to learn which branches the pull request compares. That is a read from GitHub
+  with your `gh` login, run only when a body is being set. It compares your local branch of that
+  name, or else the remote-tracking one, as they stand in this clone. If `gh` fails, the pull
+  request comes from a fork or the branch is not here, the edit is allowed unchecked.
+- The hook misses `gh` inside quotes, backticks, `gh api` or a script. Connector checks compare the
+  branches of the folder the session is in. Connector tool names were not available to test
+  against, so that path is matched by name and tested only with made-up calls. The `gh pr view`
+  lookup is tested with a stand-in, not against GitHub.
 - After a `git push` on such a branch, a hook reminds Claude to run `/living-blueprint:pr`.
   **Nothing checks a pull request made on the website or outside Claude**, and a push made there
   gives no reminder.
 - If the hook cannot work out the branches, it allows the command. It writes a "check skipped"
   note to stderr, which you and Claude may never see after an allowed command, so **treat a skip
-  as silent**. The same applies to `gh pr edit <number>`.
+  as silent**.
   A changed doc that cannot be drawn is different: the hook refuses and names the errors.
 - A diagram that a branch removes is not shown. An architecture diagram counts as changed even
   when only its cites or evidence changed.

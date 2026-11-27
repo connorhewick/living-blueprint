@@ -2,8 +2,9 @@
 """Hooks for pull requests on a branch that changed living-blueprint diagrams.
 
 Before a tool runs: such a pull request is not opened, and its body is not rewritten, without the
-current Mermaid copy, whether it goes through `gh` or a GitHub connector (`gh pr edit <number>` is
-the exception: nothing here says which branch that is). After `git push`: a
+current Mermaid copy, whether it goes through `gh` or a GitHub connector. For a pull request named
+by number or address, `gh pr view` is asked which branches it compares. The copy must come from a
+body file or a quoted heredoc: anywhere else, the shell runs parts of it. After `git push`: a
 reminder that an open pull request's diagrams may now be out of date.
 
 It allows the call whenever it cannot tell: a hook that blocks unrelated pull requests gets
@@ -15,27 +16,60 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `blueprint` is imported only where it is needed: this file runs on every Bash call in every project
 
-HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*([\"']?)([A-Za-z_]\w*)\1")
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*([\"']?)([A-Za-z_]\w*)\2")
+# a --body that is one quoted heredoc and nothing else, as it reads once the heredoc's lines are out
+QUOTED_BODY = re.compile(r"\s*\$\(\s*cat\s+<<-?\s*([\"'])[A-Za-z_]\w*\1\s*\)\s*")
+MARKED = "<!-- living-blueprint:diagrams"  # blueprint.PR_OPEN, without importing it
+REDIRECT = re.compile(r"[<>&|]*[<>][<>&|]*")
+PULL_REQUEST = re.compile(r"#?(\d+)|(https://\S+/pull/\d+\S*)")
+EDIT_SWITCHES = ("--remove-milestone",)  # every other `gh pr edit` flag takes a value
+INLINE = (
+    "Refused: the living-blueprint section is where the shell expands it (directly in --body, or in "
+    "an unquoted heredoc), so parts of it would run as commands and the body would arrive damaged. "
+    "Write the body to a file and pass it with --body-file."
+)
 SEPARATORS = set(";&|()\n")
 WRAPPERS = ("env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{")
 
 
+def split_heredocs(command: str) -> tuple[list[str], list[str], list[str]]:
+    """(lines of code, quoted heredoc bodies, unquoted heredoc bodies). The shell leaves a quoted
+    body as it is written; it expands an unquoted one."""
+    lines: list[str] = []
+    bodies: tuple[list[str], list[str]] = ([], [])
+    waiting: list[tuple[str, bool, bool]] = []
+    body: list[str] = []
+    continued = ""
+    for line in command.split("\n"):
+        if waiting:
+            delimiter, quoted, tabs = waiting[0]
+            if (line.lstrip("\t") if tabs else line) == delimiter:
+                bodies[0 if quoted else 1].append("\n".join(body))
+                body = []
+                waiting.pop(0)
+            else:
+                body.append(line)
+            continue
+        # joined only out here: inside a body, a closing backslash must not swallow the delimiter
+        if (len(line) - len(line.rstrip("\\"))) % 2:
+            continued += line[:-1] + " "
+            continue
+        line, continued = continued + line, ""
+        lines.append(line)
+        waiting += [(f.group(3), bool(f.group(2)), bool(f.group(1))) for f in HEREDOC.finditer(line)]
+    return lines + ([continued] if continued else []), *bodies
+
+
 def code_only(command: str) -> str:
     """The command without heredoc bodies and comments: text there only mentions a command."""
-    lines, waiting = [], []
-    for line in command.replace("\\\n", " ").split("\n"):
-        if waiting:
-            if line.strip() == waiting[0]:
-                waiting.pop(0)
-            continue
-        lines.append(line)
-        waiting += [found.group(2) for found in HEREDOC.finditer(line)]
+    lines = split_heredocs(command)[0]
     kept, quote, comment, escaped, before = [], "", False, False, " "
     for char in "\n".join(lines):
         if comment:
@@ -86,11 +120,13 @@ def pull_request_commands(command: str):
     """(verb, arguments) for each `gh pr create` or `gh pr edit` the shell would really run."""
     for words in simple_commands(command):
         rest = program(words, "gh")
+        before: list[str] = []
         while rest and rest[0].startswith(("-R", "--repo")):
-            rest = rest[2 if rest[0] in ("-R", "--repo") else 1 :]
+            width = 2 if rest[0] in ("-R", "--repo") else 1
+            before, rest = before + rest[:width], rest[width:]
         if not rest or len(rest) < 2 or rest[0] != "pr" or rest[1] not in ("create", "new", "edit"):
             continue
-        arguments = rest[2:]
+        arguments = rest[2:] + before
         if "--help" not in arguments and "--dry-run" not in arguments:
             yield "edit" if rest[1] == "edit" else "create", arguments
 
@@ -118,6 +154,56 @@ def option(arguments: list[str], *names: str) -> str | None:
     return None
 
 
+def selector(arguments: list[str]) -> str | None:
+    """Which pull request `gh pr edit` names: its one argument that is no flag, value or redirect."""
+    found, found_at, skip = None, -2, False
+    for index, word in enumerate(arguments):
+        if skip:
+            skip = False
+        elif REDIRECT.fullmatch(word):
+            if found_at == index - 1 and found.isdigit():
+                found = None  # the 2 of `2>&1`
+            skip = True
+        elif word.startswith("-") and word != "-":
+            skip = "=" not in word and word not in EDIT_SWITCHES and (word.startswith("--") or len(word) == 2)
+        elif found is None:
+            found, found_at = word, index
+    return found
+
+
+def branches_of(number: str, repo: str | None, cwd: Path) -> tuple[str, str] | None:
+    """(head, base) of an existing pull request, or None when that cannot be told. No shell: the
+    number and repository come from the command being checked."""
+    command = ["gh", "pr", "view", number, "--json", "headRefName,baseRefName,isCrossRepository"]
+    try:
+        out = subprocess.run(command + ([f"--repo={repo}"] if repo else []), cwd=cwd, capture_output=True, text=True, timeout=10)
+        data = json.loads(out.stdout) if out.returncode == 0 else {}
+        if data.get("isCrossRepository", True):
+            return None  # a fork's branch name says nothing about the local branch of that name
+        return str(data["headRefName"]), str(data["baseRefName"])
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, AttributeError):
+        return None
+
+
+def local_ref(root: Path, branch: str) -> str | None:
+    import blueprint as bp
+
+    for ref in (branch, f"origin/{branch}"):
+        if not ref.startswith("-") and bp.git_text(root, "rev-parse", "-q", "--verify", f"{ref}^{{commit}}") is not None:
+            return ref
+    return None
+
+
+def numbered(root: Path, number: str, repo: str | None, cwd: Path) -> tuple[str, str] | None:
+    """(local head, base) for a pull request named by number or address, saying so when unknown."""
+    found = branches_of(number, repo, cwd)
+    head = local_ref(root, found[0]) if found else None
+    if head is None:
+        print(f"living-blueprint: diagram check skipped: cannot find the branches of pull request {number[:100]}", file=sys.stderr)
+        return None
+    return head, found[1]
+
+
 def current_section(root: Path, base: str | None, head: str) -> tuple[str | None, str | None]:
     """(section, refusal). A doc that cannot be drawn is a known problem, not a doubt to allow."""
     import blueprint as bp
@@ -129,7 +215,16 @@ def current_section(root: Path, base: str | None, head: str) -> tuple[str | None
 
 
 def refusal(command: str, cwd: Path) -> str | None:
-    for verb, arguments in pull_request_commands(command):
+    try:
+        found = list(pull_request_commands(command))
+    except ValueError:
+        # an inline section brings quotes of its own, which can leave the line unreadable
+        lines, _, unquoted = split_heredocs(command)
+        text = "\n".join(lines + unquoted)
+        if MARKED in text and re.search(r"\bgh\b[^\n]*\bpr\s+(create|new|edit)\b", text):
+            return INLINE
+        raise
+    for verb, arguments in found:
         message = check_one(command, verb, arguments, moved_to(command, cwd))
         if message:
             return message
@@ -138,35 +233,52 @@ def refusal(command: str, cwd: Path) -> str | None:
 
 def check_one(command: str, verb: str, arguments: list[str], cwd: Path) -> str | None:
     body_file = option(arguments, "--body-file", "-F")
-    sets_body = body_file is not None or option(arguments, "--body", "-b") is not None
-    head = option(arguments, "--head", "-H")
-    if verb == "edit":
-        if not sets_body:
-            return None
-        if arguments and not arguments[0].startswith("-"):
-            head = arguments[0]  # a branch name says what to compare; a number or address does not
-            if head.isdigit() or "://" in head:
-                print("living-blueprint: diagram check skipped: cannot tell which branch that pull request is", file=sys.stderr)
-                return None
+    body = option(arguments, "--body", "-b")
+    if verb == "edit" and body_file is None and body is None:
+        return None
+    _, quoted, unquoted = split_heredocs(command)
+    quoted_in_body = body is not None and QUOTED_BODY.fullmatch(body) is not None
+    from_heredoc = body_file == "-" or quoted_in_body
+    # refused whatever the branch turns out to be: this text must never reach the shell
+    expanded = (body is not None and MARKED in body) or (
+        (body_file == "-" or (body or "").lstrip().startswith("$(")) and any(MARKED in b for b in unquoted)
+    )
+    if expanded:
+        return INLINE
 
     import blueprint as bp
 
     root = bp.repo_root(cwd)
-    section, broken = current_section(root, option(arguments, "--base", "-B"), head.split(":")[-1] if head else "HEAD")
+    base = option(arguments, "--base", "-B")
+    head = option(arguments, "--head", "-H")
+    head = head.split(":")[-1] if head else "HEAD"
+    if verb == "edit":
+        named = selector(arguments)
+        pull_request = PULL_REQUEST.fullmatch(named or "")
+        if pull_request:
+            repo = option(arguments, "--repo", "-R")
+            found = numbered(root, pull_request.group(1) or pull_request.group(2), repo, cwd)
+            if found is None:
+                return None
+            head, base = found[0], base or found[1]
+        elif named:
+            head = named  # a branch name says what to compare
+    section, broken = current_section(root, base, head)
     if broken or section is None:
         return broken
 
-    shown = command
+    given: list[str] = list(quoted) if from_heredoc else []
     if body_file and body_file != "-":
         path = Path(body_file).expanduser()
         path = path if path.is_absolute() else cwd / path
         if path.is_file():
-            shown += "\n" + path.read_text(encoding="utf-8", errors="replace")
-    if section in shown.replace("\r\n", "\n"):
+            given.append(path.read_text(encoding="utf-8", errors="replace"))
+    if any(section in text.replace("\r\n", "\n") for text in given):
         return None
     return (
         "Refused: this branch changes living-blueprint diagrams, and the pull request body does not "
-        "carry their current Mermaid copy. Write the rest of the body to a file, then:\n"
+        "carry their current Mermaid copy in a body file or a quoted heredoc. Write the rest of the "
+        "body to a file, then:\n"
         f"{how_to_fix(root)}\n"
         "and pass that file with --body-file. For an open pull request, first save its current body "
         "with `gh pr view <n> --json body -q .body > <body file>`. In a command that was just "
@@ -189,8 +301,18 @@ def connector_refusal(tool: str, arguments: dict, cwd: Path) -> str | None:
     import blueprint as bp
 
     root = bp.repo_root(cwd)
+    base = arguments.get("base")
     head = arguments.get("head")
-    section, broken = current_section(root, arguments.get("base"), str(head).split(":")[-1] if head else "HEAD")
+    head = str(head).split(":")[-1] if head else None
+    number = next((str(arguments[k]) for k in ("pullNumber", "pull_number", "number") if k in arguments), "")
+    if head is None and "create" not in name and number.isdigit():
+        owner, repo = str(arguments.get("owner", "")), str(arguments.get("repo", ""))
+        full = f"{owner}/{repo}"
+        found = numbered(root, number, full if re.fullmatch(r"[\w.-]+/[\w.-]+", full) else None, cwd)
+        if found is None:
+            return None
+        head, base = found[0], base or found[1]
+    section, broken = current_section(root, base, head or "HEAD")
     if broken:
         return broken
     if section is None or section in str(body or "").replace("\r\n", "\n"):

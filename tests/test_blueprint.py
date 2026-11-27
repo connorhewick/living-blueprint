@@ -1,5 +1,6 @@
 """python3 -m unittest discover -s tests"""
 
+import io
 import json
 import os
 import re
@@ -767,11 +768,118 @@ class PullRequest(Repo):
             with self.subTest(command=command):
                 self.assertIsNotNone(pr_gate.refusal(command, self.root))
 
-    def test_an_edit_is_checked_only_when_its_branch_is_known(self):
-        self.assertIsNone(pr_gate.refusal("gh pr edit 12 --base main --body new", self.root))
-        self.assertIsNone(pr_gate.refusal("gh pr edit https://github.com/o/r/pull/3 --body new", self.root))
+    def test_the_section_is_refused_where_the_shell_would_run_it(self):
+        section = self.section()
+        for name, command in (
+            ("double quotes", f'gh pr create -B main --body "{section}"'),
+            ("single quotes", f"gh pr create -B main --body '{section}'"),
+            ("unquoted heredoc", f"gh pr create -B main --body-file - <<EOF\n{section}\nEOF"),
+            ("unquoted heredoc in --body", f'gh pr create -B main --body "$(cat <<EOF\n{section}\nEOF\n)"'),
+            ("inline beside a quoted copy", f'gh pr create -B main --body "{section}$(cat <<\'EOF\'\n{section}\nEOF\n)"'),
+            ("a quoted copy that is not the body", f"cat <<'EOF' > n.md\n{section}\nEOF\ngh pr create -B main --body short"),
+            ("inline, branch unknown", f'gh pr edit 12 --body "{section}"'),
+        ):
+            with self.subTest(name), mock.patch.object(pr_gate, "branches_of", return_value=None):
+                self.assertIn("Refused", pr_gate.refusal(command, self.root) or "")
+
+    def test_inline_text_that_cannot_even_be_parsed_is_refused(self):
+        self.commit_design(lambda d: d.update(title="the shop's 5\" order"))
+        section = self.section()
+        for quote in ('"', "'"):
+            with self.subTest(quote=quote):
+                command = f"gh pr create -B main --body {quote}{section}{quote}"
+                self.assertIn("Refused", pr_gate.refusal(command, self.root) or "")
+
+    def test_the_section_is_accepted_from_a_quoted_heredoc(self):
+        section = self.section()
+        for command in (
+            f"gh pr create -B main --body-file - <<'EOF'\n{section}\nEOF",
+            f'gh pr create -B main -F - <<"EOF"\n## Summary\n\n{section}\nEOF',
+        ):
+            with self.subTest(command=command[:50]):
+                self.assertIsNone(pr_gate.refusal(command, self.root))
+
+    def test_a_backslash_ending_a_heredoc_line_does_not_hide_what_follows(self):
+        command = "cat <<'EOF' > notes.md\nends in \\\nEOF\ngh pr create -B main --fill"
+        self.assertIsNotNone(pr_gate.refusal(command, self.root))
+        self.assertIsNotNone(pr_gate.refusal("gh pr create \\\n  -B main --fill", self.root))
+
+    def test_an_edit_by_number_is_checked_against_that_pull_requests_branches(self):
+        body = self.root.parent / "body.md"
+        body.write_text("no diagrams")
+        git(self.root, "switch", "-q", "main")  # not the pull request's branch
+        asked = mock.patch.object(pr_gate, "branches_of", return_value=("feat/cancel", "main"))
+        for command in (
+            f"gh pr edit 5 --body-file {body}",
+            f"gh pr edit --body-file {body} 5",
+            f"gh pr edit --title t --add-label x -F {body} '#5'",
+            f"gh pr edit --remove-milestone 5 --body-file {body} 2>&1",
+            "gh pr edit https://github.com/o/r/pull/5 --body new > out.txt",
+        ):
+            with self.subTest(command=command), asked as lookup:
+                self.assertIn("Refused", pr_gate.refusal(command, self.root) or "")
+                self.assertIn(lookup.call_args.args[0], ("5", "https://github.com/o/r/pull/5"))
+        body.write_text(bp.put_section("", bp.pr_section(self.root, "main", "feat/cancel")))
+        with asked:
+            self.assertIsNone(pr_gate.refusal(f"gh pr edit 5 --body-file {body}", self.root))
+
+    def test_an_unrelated_pull_request_is_not_held_to_this_branchs_diagrams(self):
+        git(self.root, "branch", "fix/other", "main")
+        with mock.patch.object(pr_gate, "branches_of", return_value=("fix/other", "main")):
+            self.assertIsNone(pr_gate.refusal("gh pr edit --body new 5", self.root))
+            self.assertIsNone(pr_gate.connector_refusal("mcp__github__update_pull_request", {"pullNumber": 77, "body": "x"}, self.root))
+
+    def test_an_edit_whose_branches_cannot_be_found_is_allowed(self):
+        for found in (None, ("gone/branch", "main")):
+            with self.subTest(found=found), mock.patch.object(pr_gate, "branches_of", return_value=found):
+                event = {"tool_name": "Bash", "tool_input": {"command": "gh pr edit 12 --body new"}, "cwd": str(self.root)}
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(event))), mock.patch("sys.stderr", new_callable=io.StringIO) as said:
+                    self.assertEqual(pr_gate.main(), 0)
+                self.assertIn("skipped", said.getvalue())
+
+    def test_a_branch_only_on_the_remote_is_still_compared(self):
+        git(self.root, "update-ref", "refs/remotes/origin/feat/cancel", "feat/cancel")
         git(self.root, "switch", "-q", "main")
-        self.assertIsNotNone(pr_gate.refusal("gh pr edit feat/cancel --base main --body new", self.root))
+        git(self.root, "branch", "-qD", "feat/cancel")
+        with mock.patch.object(pr_gate, "branches_of", return_value=("feat/cancel", "main")):
+            self.assertIn("Refused", pr_gate.refusal("gh pr edit 5 --body new", self.root))
+
+    def test_the_lookup_asks_about_the_repository_the_command_names(self):
+        for command in ("gh -R me/shop pr edit 5 --body new", "gh pr edit 5 --repo=me/shop --body new"):
+            with self.subTest(command=command), mock.patch.object(pr_gate, "branches_of", return_value=None) as lookup, mock.patch("sys.stderr"):
+                pr_gate.refusal(command, self.root)
+                self.assertEqual(lookup.call_args.args[:2], ("5", "me/shop"))
+
+    def test_a_connector_edit_by_number_is_checked_against_that_pull_request(self):
+        git(self.root, "switch", "-q", "main")
+        update = "mcp__github__update_pull_request"
+        arguments = {"owner": "me", "repo": "shop", "pullNumber": 5, "body": "x"}
+        with mock.patch.object(pr_gate, "branches_of", return_value=("feat/cancel", "main")) as lookup:
+            self.assertIn("Refused", pr_gate.connector_refusal(update, arguments, self.root))
+        self.assertEqual(lookup.call_args.args[:2], ("5", "me/shop"))
+
+    def test_the_lookup_passes_arguments_without_a_shell_and_gives_up_quietly(self):
+        answer = {"headRefName": "feat/cancel", "baseRefName": "main", "isCrossRepository": False}
+        def says(stdout, code=0):
+            return mock.patch.object(pr_gate.subprocess, "run", return_value=subprocess.CompletedProcess([], code, stdout, ""))
+        with says(json.dumps(answer)) as run:
+            self.assertEqual(pr_gate.branches_of("5", "me/shop", self.root), ("feat/cancel", "main"))
+        self.assertEqual(run.call_args.args[0], ["gh", "pr", "view", "5", "--json", "headRefName,baseRefName,isCrossRepository", "--repo=me/shop"])
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertLess(run.call_args.kwargs["timeout"], 30)
+        for stdout, code in ((json.dumps({**answer, "isCrossRepository": True}), 0), ("not json", 0), ("{}", 0), (json.dumps(answer), 1)):
+            with self.subTest(stdout=stdout[:20], code=code), says(stdout, code):
+                self.assertIsNone(pr_gate.branches_of("5", None, self.root))
+        for error in (FileNotFoundError(), subprocess.TimeoutExpired("gh", 1)):
+            with mock.patch.object(pr_gate.subprocess, "run", side_effect=error):
+                self.assertIsNone(pr_gate.branches_of("5", None, self.root))
+
+    def test_a_named_branch_needs_no_lookup(self):
+        git(self.root, "switch", "-q", "main")
+        with mock.patch.object(pr_gate, "branches_of") as lookup:
+            self.assertIsNotNone(pr_gate.refusal("gh pr edit feat/cancel --base main --body new", self.root))
+            self.assertIsNone(pr_gate.refusal("gh pr edit 5 --title new", self.root))
+        lookup.assert_not_called()
 
     def test_a_broken_doc_stops_the_pull_request_instead_of_vanishing(self):
         body_command = "gh pr create -B main --fill"
