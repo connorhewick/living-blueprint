@@ -114,6 +114,7 @@ section ids:
 - To remove a whole existing block, give the design block the same id and `type` and mark the
   **block** `removed`. A `text`, `code` or `matrix` block is changed the same way, marked
   `changed`. A block with items is changed through its items; leave the block itself unmarked.
+  A block marked `removed` or `changed` whose id the architecture doc lacks stops the integration.
 - A new block goes into the architecture section named by its `into`, else into a
   "Proposed: <title>" section.
 - Only things marked other than `built` travel on integrate. Problem, options and acceptance stay

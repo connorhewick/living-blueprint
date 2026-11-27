@@ -585,6 +585,8 @@ def integrate(architecture: dict, design: dict) -> dict:
             replace_block(sections, block, target, slug)
             continue
         if target is None:
+            if status_of(block) in ("changed", "removed"):  # a mistyped id must not add the block as new
+                raise BlueprintError(f"{block['id']}: marked {status_of(block)} but is not in the architecture doc")
             added = copy.deepcopy(block)
             added.update(status="proposed", design=slug)
             into = added.pop("into", None)

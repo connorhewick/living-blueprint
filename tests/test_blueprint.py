@@ -487,6 +487,13 @@ class WholeBlocks(Repo):
         for gone in ("status", "was", "design"):
             self.assertNotIn(gone, found["note"])
 
+    def test_a_whole_block_that_is_not_there_cannot_be_changed_or_removed(self):
+        for status in ("removed", "changed"):
+            for block in ({"id": "nope", "type": "text", "text": "x"}, {"id": "nope", "type": "code", "code": "x", "caption": {"takeaway": "t"}}):
+                with self.subTest(status=status, type=block["type"]):
+                    with self.assertRaisesRegex(bp.BlueprintError, f"nope: marked {status} but is not in the architecture doc"):
+                        bp.integrate(self.arch(), self.design({**block, "status": status, "design": "order-cancel"}))
+
     def test_a_block_with_items_is_changed_item_by_item(self):
         with self.assertRaisesRegex(bp.BlueprintError, "mark the items"):
             bp.integrate(self.arch(), self.design({"id": "layers", "type": "graph", "status": "changed", "design": "order-cancel",
