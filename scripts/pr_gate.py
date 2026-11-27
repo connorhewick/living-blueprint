@@ -370,7 +370,8 @@ def main() -> int:
         else:
             message = refusal(command, cwd) if "gh" in command else None
     except Exception as error:  # allow, and say so: see the module docstring
-        print(f"living-blueprint: pull request diagram check skipped ({error})", file=sys.stderr)
+        why = " ".join(str(error).split())[:150]  # it can carry text from a doc or a command
+        print(f"living-blueprint: pull request diagram check skipped ({why})", file=sys.stderr)
         return 0
     if message:
         print(message, file=sys.stderr)
