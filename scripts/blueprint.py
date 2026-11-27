@@ -29,6 +29,7 @@ SCHEMA = 1
 MARKER = "livingBlueprint"
 CONFIG = ".claude/living-blueprint.json"
 DEFAULT_DOCS_DIR = "docs/architecture"
+MAX_DOC = 5_000_000  # bytes: no doc or config this tool reads is near it
 PAGE_DIR = Path(__file__).resolve().parent / "page"
 
 STATUSES = ("built", "proposed", "changed", "removed")
@@ -156,6 +157,7 @@ def docs_dir(root: Path, override: str | None = None) -> tuple[str, str]:
         inside(root, override, "--docs-dir")
         return Path(override).as_posix(), "argument"
     config = root / CONFIG
+    refuse_links(config, below=root)  # the folder too: either can be a link the repository shipped
     if config.exists():
         value = load_json(config).get("docsDir")
         if value is not None:
@@ -190,7 +192,7 @@ def find_docs(root: Path) -> list[str]:
         try:
             info = path.lstat()
             # not a link: one can point at a device that never stops giving
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 5_000_000:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_DOC:
                 continue
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError):
@@ -238,11 +240,29 @@ def set_docs_dir(root: Path, new: str, move: bool) -> list[str]:
 # ---------------------------------------------------------------- reading and writing
 
 
-def load_json(path: Path) -> dict:
+def read_regular(path: Path) -> str:
+    """The text of a plain file. A repository can point a link at a pipe or a device, which would
+    never answer or never end."""
+    # O_NONBLOCK so that opening a pipe returns at once; neither flag exists on Windows
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        handle = os.open(path, flags)
     except FileNotFoundError:
         raise BlueprintError(f"{path}: not found") from None
+    except OSError as error:
+        raise BlueprintError(f"{path}: cannot be opened ({error.strerror})") from None
+    with os.fdopen(handle, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise BlueprintError(f"{path}: is not a regular file")
+        data = stream.read(MAX_DOC + 1)
+    if len(data) > MAX_DOC:
+        raise BlueprintError(f"{path}: is larger than {MAX_DOC} bytes")
+    return data.decode("utf-8")
+
+
+def load_json(path: Path) -> dict:
+    try:
+        data = json.loads(read_regular(path))
     except (ValueError, RecursionError) as error:
         raise BlueprintError(f"{path}: not valid JSON ({error})") from None
     if not isinstance(data, dict):

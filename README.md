@@ -102,6 +102,8 @@ Docs and config come with whatever repository you open, so they are treated as u
 - Paths read from a doc or the config must resolve inside the repository and outside `.git`.
 - Nothing is written through a symlink. `--fragment` and `--into` may point anywhere you name,
   but not at a link.
+- The config may not be a symlink or sit in a linked folder. The config and docs are read only
+  when they are plain files of at most 5 MB.
 - Docs that are symlinks are ignored, and the script's own `git` calls will not run a program
   named by a bare repository hidden in a subfolder.
 - Page text is inserted as text, never as markup, and cannot close the script element carrying it.

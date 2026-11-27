@@ -608,6 +608,52 @@ class AWriteThatFails(Repo):
         self.assertEqual((self.root / "fresh.md").stat().st_mode & 0o777, 0o640)
 
 
+class ReadingTheConfigAndDocs(Repo):
+    """What a repository ships may be a link to something that never ends, or never answers."""
+
+    def run_briefly(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts/blueprint.py"), "--repo", str(self.root), *args],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def test_a_config_linked_to_a_pipe_is_refused_without_waiting(self):
+        os.mkfifo(self.root.parent / "pipe")
+        (self.root / ".claude").mkdir()
+        (self.root / bp.CONFIG).symlink_to(self.root.parent / "pipe")
+        result = self.run_briefly("where")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("symlink", result.stderr)
+
+    def test_a_linked_config_is_refused_even_when_it_leads_to_a_good_file(self):
+        (self.root / "real.json").write_text('{"docsDir": "handbook"}')
+        (self.root / ".claude").mkdir()
+        (self.root / bp.CONFIG).symlink_to(self.root / "real.json")
+        with self.assertRaisesRegex(bp.BlueprintError, "symlink"):
+            bp.docs_dir(self.root)
+
+    def test_a_linked_config_folder_is_refused(self):
+        (self.root / "shared").mkdir()
+        (self.root / "shared/living-blueprint.json").write_text('{"docsDir": "handbook"}')
+        (self.root / ".claude").symlink_to(self.root / "shared")
+        with self.assertRaisesRegex(bp.BlueprintError, "symlink"):
+            bp.docs_dir(self.root)
+
+    def test_only_a_regular_file_of_a_sane_size_is_read(self):
+        pipe = self.root / "pipe.json"
+        os.mkfifo(pipe)
+        result = self.run_briefly("validate", "pipe.json")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("not a regular file", result.stderr)
+        large = self.root / "large.json"
+        large.write_text('{"a": "' + "x" * bp.MAX_DOC + '"}')
+        with self.assertRaisesRegex(bp.BlueprintError, "larger than"):
+            bp.load_json(large)
+        (self.root / "link.json").symlink_to(self.root / ARCH)
+        with self.assertRaises(bp.BlueprintError):
+            bp.load_json(self.root / "link.json")
+
+
 class PullRequest(Repo):
     """main holds the code and the architecture doc; the branch adds the design."""
 
