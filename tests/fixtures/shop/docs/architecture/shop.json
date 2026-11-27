@@ -1,0 +1,422 @@
+{
+  "livingBlueprint": 1,
+  "id": "shop",
+  "kind": "architecture",
+  "title": "Shop architecture",
+  "summary": "A made-up web shop: a React page, a FastAPI service, a worker and a Postgres schema. It is test data.",
+  "sources": [
+    "."
+  ],
+  "layers": [
+    {
+      "id": "web",
+      "label": "Web"
+    },
+    {
+      "id": "api",
+      "label": "API"
+    },
+    {
+      "id": "jobs",
+      "label": "Worker"
+    },
+    {
+      "id": "data",
+      "label": "Data"
+    }
+  ],
+  "sections": [
+    {
+      "id": "overview",
+      "title": "1. Overview",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "layers",
+          "type": "graph",
+          "caption": {
+            "takeaway": "The page talks only to the API.",
+            "text": "The worker receives messages the API publishes."
+          },
+          "nodes": [
+            {
+              "id": "checkout",
+              "title": "Checkout",
+              "lines": [
+                "Places an order"
+              ],
+              "layer": "web",
+              "col": 0,
+              "row": 0,
+              "cites": [
+                "web/src/Checkout.tsx#Checkout"
+              ]
+            },
+            {
+              "id": "routes",
+              "title": "api/main.py",
+              "lines": [
+                "HTTP routes"
+              ],
+              "layer": "api",
+              "col": 1,
+              "row": 0,
+              "cites": [
+                "api/main.py#create_order"
+              ]
+            },
+            {
+              "id": "service",
+              "title": "OrderService",
+              "lines": [
+                "Only writer of orders"
+              ],
+              "layer": "api",
+              "col": 1,
+              "row": 1,
+              "cites": [
+                "api/orders.py#OrderService"
+              ]
+            },
+            {
+              "id": "repo",
+              "title": "OrderRepository",
+              "lines": [
+                "SQL access"
+              ],
+              "layer": "data",
+              "col": 1,
+              "row": 2,
+              "cites": [
+                "api/repository.py#OrderRepository"
+              ]
+            },
+            {
+              "id": "queue",
+              "title": "publish",
+              "lines": [
+                "Message hand-off"
+              ],
+              "layer": "api",
+              "col": 2,
+              "row": 1,
+              "cites": [
+                "api/queue.py#publish"
+              ]
+            },
+            {
+              "id": "worker",
+              "title": "send_receipt",
+              "lines": [
+                "Receipt job"
+              ],
+              "layer": "jobs",
+              "col": 3,
+              "row": 0,
+              "cites": [
+                "worker/receipts.py#send_receipt"
+              ]
+            },
+            {
+              "id": "schema",
+              "title": "orders",
+              "lines": [
+                "Postgres table"
+              ],
+              "layer": "data",
+              "col": 3,
+              "row": 2,
+              "cites": [
+                "db/schema.sql#orders"
+              ]
+            }
+          ],
+          "edges": [
+            {
+              "from": "checkout",
+              "to": "routes",
+              "label": "POST /orders",
+              "cites": [
+                "web/src/Checkout.tsx"
+              ]
+            },
+            {
+              "from": "routes",
+              "to": "service",
+              "label": "calls"
+            },
+            {
+              "from": "service",
+              "to": "repo",
+              "label": "writes through"
+            },
+            {
+              "from": "service",
+              "to": "queue",
+              "label": "publishes"
+            },
+            {
+              "from": "queue",
+              "to": "worker",
+              "label": "order.placed"
+            },
+            {
+              "from": "repo",
+              "to": "schema",
+              "label": "rows"
+            },
+            {
+              "from": "checkout",
+              "to": "schema",
+              "label": "no direct path today",
+              "id": "forbidden"
+            }
+          ]
+        },
+        {
+          "id": "rules",
+          "type": "table",
+          "caption": {
+            "takeaway": "One rule keeps writes in one place, and only review holds it.",
+            "text": ""
+          },
+          "columns": [
+            "Rule",
+            "Why",
+            "Held by"
+          ],
+          "evidence": "read",
+          "rows": [
+            {
+              "id": "single-writer",
+              "cells": [
+                "Only `OrderService` writes orders",
+                "One place to publish events",
+                "**review only**"
+              ],
+              "cites": [
+                "api/orders.py#OrderService"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "size",
+          "type": "bars",
+          "unit": "files",
+          "caption": {
+            "takeaway": "The API holds most files.",
+            "text": ""
+          },
+          "bars": [
+            {
+              "label": "api",
+              "value": 4,
+              "layer": "api"
+            },
+            {
+              "label": "web",
+              "value": 1,
+              "layer": "web"
+            },
+            {
+              "label": "worker",
+              "value": 1,
+              "layer": "jobs"
+            },
+            {
+              "label": "db",
+              "value": 1,
+              "layer": "data"
+            }
+          ],
+          "cites": [
+            "api"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stories",
+      "title": "2. User stories",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "story-matrix",
+          "type": "matrix",
+          "caption": {
+            "takeaway": "Both stories go through the API routes.",
+            "text": ""
+          }
+        },
+        {
+          "id": "place-order",
+          "type": "swimlane",
+          "story": "Place an order",
+          "caption": {
+            "takeaway": "Placing an order writes once, then publishes.",
+            "text": ""
+          },
+          "lanes": [
+            {
+              "id": "page",
+              "title": "Checkout",
+              "layer": "web"
+            },
+            {
+              "id": "http",
+              "title": "api/main.py",
+              "layer": "api"
+            },
+            {
+              "id": "svc",
+              "title": "OrderService",
+              "layer": "api"
+            },
+            {
+              "id": "job",
+              "title": "send_receipt",
+              "layer": "jobs"
+            }
+          ],
+          "steps": [
+            {
+              "id": "click",
+              "lane": "page",
+              "title": "placeOrder",
+              "note": "Posts the cart id",
+              "cites": [
+                "web/src/Checkout.tsx#placeOrder"
+              ]
+            },
+            {
+              "id": "route",
+              "lane": "http",
+              "title": "create_order",
+              "cites": [
+                "api/main.py#create_order"
+              ]
+            },
+            {
+              "id": "place",
+              "lane": "svc",
+              "title": "OrderService.place",
+              "note": "Inserts as placed",
+              "effect": "Row added to orders",
+              "cites": [
+                "api/orders.py#place"
+              ]
+            },
+            {
+              "id": "receipt",
+              "lane": "job",
+              "title": "send_receipt",
+              "note": "On order.placed",
+              "effect": "Receipt printed",
+              "cites": [
+                "worker/receipts.py#send_receipt"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "read-order",
+          "type": "swimlane",
+          "story": "Read an order",
+          "caption": {
+            "takeaway": "Reading publishes nothing.",
+            "text": ""
+          },
+          "lanes": [
+            {
+              "id": "http",
+              "title": "api/main.py",
+              "layer": "api"
+            },
+            {
+              "id": "svc",
+              "title": "OrderService",
+              "layer": "api"
+            }
+          ],
+          "steps": [
+            {
+              "id": "route",
+              "lane": "http",
+              "title": "read_order",
+              "cites": [
+                "api/main.py#read_order"
+              ]
+            },
+            {
+              "id": "find",
+              "lane": "svc",
+              "title": "OrderService.find",
+              "cites": [
+                "api/orders.py#find"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "patterns",
+      "title": "3. Patterns",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "service-pattern",
+          "type": "code",
+          "code": "order = self.repository.insert(cart_id, status=\"placed\")\npublish(\"order.placed\", order)",
+          "caption": {
+            "takeaway": "Write first, publish second.",
+            "text": ""
+          },
+          "cites": [
+            "api/orders.py"
+          ]
+        },
+        {
+          "id": "gaps",
+          "type": "list",
+          "caption": {
+            "takeaway": "One failure mode is open.",
+            "text": ""
+          },
+          "items": [
+            {
+              "id": "no-outbox",
+              "text": "If `publish` fails after the insert, no receipt is sent.",
+              "cites": [
+                "api/orders.py#publish"
+              ],
+              "evidence": "read"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "measures": [
+      {
+        "id": "routes",
+        "label": "HTTP routes",
+        "command": "grep -c '^@app\\.' api/main.py",
+        "value": "2"
+      }
+    ],
+    "inventory": [
+      {
+        "id": "tables",
+        "label": "Database tables",
+        "command": "sed -n 's/^CREATE TABLE \\([a-z_]*\\).*/\\1/p' db/schema.sql",
+        "items": [
+          "order_events",
+          "orders"
+        ]
+      }
+    ]
+  }
+}

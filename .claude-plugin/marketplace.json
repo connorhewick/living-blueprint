@@ -1,0 +1,6 @@
+{
+  "name": "living-blueprint",
+  "owner": { "name": "Connor Hewick" },
+  "description": "The living-blueprint plugin.",
+  "plugins": [{ "name": "living-blueprint", "source": "./", "description": "Map, design, build and drift-check architecture docs." }]
+}
