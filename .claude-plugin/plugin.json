@@ -1,0 +1,8 @@
+{
+  "name": "living-blueprint",
+  "version": "0.1.0",
+  "description": "Map an architecture, design changes by interview, build approved designs, and keep the document true to the code. Any stack.",
+  "author": { "name": "Connor Hewick" },
+  "repository": "https://github.com/connorhewick/living-blueprint",
+  "keywords": ["architecture", "design", "documentation", "drift"]
+}

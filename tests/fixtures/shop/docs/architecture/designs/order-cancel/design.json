@@ -1,0 +1,305 @@
+{
+  "livingBlueprint": 1,
+  "id": "order-cancel",
+  "kind": "design",
+  "state": "draft",
+  "title": "Cancel an order",
+  "summary": "Let a customer cancel an order before it ships.",
+  "openQuestions": [],
+  "layers": [
+    {
+      "id": "web",
+      "label": "Web"
+    },
+    {
+      "id": "api",
+      "label": "API"
+    },
+    {
+      "id": "jobs",
+      "label": "Worker"
+    },
+    {
+      "id": "data",
+      "label": "Data"
+    }
+  ],
+  "sections": [
+    {
+      "id": "problem",
+      "title": "1. Problem and scope",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "problem-text",
+          "type": "text",
+          "text": "A customer cannot cancel. **Out of scope:** refunds and partial cancellation."
+        }
+      ]
+    },
+    {
+      "id": "flow",
+      "title": "2. New flow",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "cancel-flow",
+          "type": "swimlane",
+          "story": "Cancel an order",
+          "into": "stories",
+          "caption": {
+            "takeaway": "Cancelling goes through the same service as placing.",
+            "text": ""
+          },
+          "lanes": [
+            {
+              "id": "page",
+              "title": "Checkout",
+              "layer": "web"
+            },
+            {
+              "id": "http",
+              "title": "api/main.py",
+              "layer": "api"
+            },
+            {
+              "id": "svc",
+              "title": "OrderService",
+              "layer": "api"
+            }
+          ],
+          "steps": [
+            {
+              "id": "press",
+              "lane": "page",
+              "title": "Cancel button",
+              "status": "proposed",
+              "design": "order-cancel"
+            },
+            {
+              "id": "route",
+              "lane": "http",
+              "title": "cancel_order",
+              "status": "proposed",
+              "design": "order-cancel"
+            },
+            {
+              "id": "cancel",
+              "lane": "svc",
+              "title": "OrderService.cancel",
+              "effect": "Publishes order.cancelled",
+              "status": "proposed",
+              "design": "order-cancel"
+            }
+          ]
+        },
+        {
+          "id": "layers",
+          "type": "graph",
+          "caption": {
+            "takeaway": "One new node and edge.",
+            "text": ""
+          },
+          "nodes": [
+            {
+              "id": "queue",
+              "title": "publish",
+              "lines": [
+                "Message hand-off"
+              ],
+              "layer": "api",
+              "col": 2,
+              "row": 1,
+              "cites": [
+                "api/queue.py#publish"
+              ]
+            },
+            {
+              "id": "notify",
+              "title": "send_cancellation",
+              "lines": [
+                "New job"
+              ],
+              "layer": "jobs",
+              "col": 3,
+              "row": 1,
+              "status": "proposed",
+              "design": "order-cancel"
+            },
+            {
+              "id": "service",
+              "title": "OrderService",
+              "lines": [
+                "Only writer of orders",
+                "Also cancels"
+              ],
+              "layer": "api",
+              "col": 1,
+              "row": 1,
+              "status": "changed",
+              "design": "order-cancel"
+            }
+          ],
+          "edges": [
+            {
+              "from": "queue",
+              "to": "notify",
+              "label": "order.cancelled",
+              "status": "proposed",
+              "design": "order-cancel"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data",
+      "title": "3. Data changes",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "data-table",
+          "type": "table",
+          "caption": {
+            "takeaway": "One new status value; no migration.",
+            "text": ""
+          },
+          "columns": [
+            "Change",
+            "Migration or deploy step"
+          ],
+          "rows": [
+            {
+              "id": "status",
+              "cells": [
+                "`orders.status` gains `cancelled`",
+                "None: the column is free text"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "effects",
+      "title": "4. Cross-cutting effects",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "effects-table",
+          "type": "table",
+          "caption": {
+            "takeaway": "Events and receipts are affected.",
+            "text": ""
+          },
+          "columns": [
+            "Concern",
+            "Effect"
+          ],
+          "rows": [
+            {
+              "id": "events",
+              "cells": [
+                "Messaging",
+                "New topic"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "options",
+      "title": "5. Options",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "options-table",
+          "type": "table",
+          "caption": {
+            "takeaway": "A status change is picked.",
+            "text": ""
+          },
+          "columns": [
+            "Option",
+            "Why or why not",
+            "Picked"
+          ],
+          "rows": [
+            {
+              "id": "status-change",
+              "cells": [
+                "Change status",
+                "Keeps history",
+                "yes"
+              ]
+            },
+            {
+              "id": "delete-row",
+              "cells": [
+                "Delete the row",
+                "Loses history",
+                "no"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "enforcement",
+      "title": "6. Enforcement",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "enforce-table",
+          "type": "table",
+          "caption": {
+            "takeaway": "A test holds the new rule.",
+            "text": ""
+          },
+          "columns": [
+            "Rule",
+            "Held by",
+            "Where"
+          ],
+          "rows": [
+            {
+              "id": "no-cancel-shipped",
+              "cells": [
+                "A shipped order cannot be cancelled",
+                "test",
+                "tests/test_cancel.py"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "acceptance",
+      "title": "Acceptance criteria",
+      "level": 2,
+      "blocks": [
+        {
+          "id": "acceptance-list",
+          "type": "list",
+          "caption": {
+            "takeaway": "Done means both hold.",
+            "text": ""
+          },
+          "items": [
+            {
+              "id": "ac1",
+              "text": "Cancelling a placed order sets its status to cancelled."
+            },
+            {
+              "id": "ac2",
+              "text": "Cancelling a shipped order is refused."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
