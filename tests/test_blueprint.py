@@ -326,6 +326,32 @@ class NothingIsWrittenThroughALink(Repo):
                 self.assertEqual(cli(self.root, *args).returncode, 2)
                 self.untouched()
 
+    def test_a_move_does_not_pass_through_a_linked_folder_in_the_destination(self):
+        (self.root / "handbook").mkdir()
+        (self.root / "elsewhere").mkdir()
+        (self.root / "handbook/designs").symlink_to(self.root / "elsewhere")
+        with self.assertRaisesRegex(bp.BlueprintError, "symlink"):
+            bp.set_docs_dir(self.root, "handbook", move=True)
+        self.assertEqual(list((self.root / "elsewhere").iterdir()), [])
+        for kept in (ARCH, DESIGN):
+            self.assertTrue((self.root / kept).is_file(), kept)
+
+    def test_a_dangling_link_counts_as_something_in_the_way_of_a_move(self):
+        (self.root / "handbook").mkdir()
+        (self.root / "handbook/shop.json").symlink_to(self.root / "nowhere")
+        with self.assertRaisesRegex(bp.BlueprintError, "refusing to overwrite"):
+            bp.set_docs_dir(self.root, "handbook", move=True)
+        self.assertTrue((self.root / "handbook/shop.json").is_symlink())
+        self.assertTrue((self.root / ARCH).is_file())
+
+    def test_render_checks_every_target_before_writing_the_first(self):
+        page, copy = (self.root / ARCH).with_suffix(".html"), (self.root / ARCH).with_suffix(".md")
+        page.write_text("old page")
+        copy.symlink_to(self.victim)
+        self.assertEqual(cli(self.root, "render", ARCH, "--markdown").returncode, 2)
+        self.assertEqual(page.read_text(), "old page")
+        self.untouched()
+
     def test_a_linked_config_or_config_folder_is_refused(self):
         (self.root / ".claude").mkdir()
         (self.root / bp.CONFIG).symlink_to(self.victim)
@@ -486,6 +512,33 @@ class WholeBlocks(Repo):
         self.assertEqual(found["note"]["text"], "new words")
         for gone in ("status", "was", "design"):
             self.assertNotIn(gone, found["note"])
+
+    def test_everything_in_a_wholly_new_graph_or_flow_is_marked_in_the_markdown(self):
+        design = self.load(DESIGN)
+        found = [b for _, b in bp.blocks(design) if b["type"] in ("graph", "swimlane")]
+        self.assertEqual({b["type"] for b in found}, {"graph", "swimlane"})
+        for block in found:
+            block.update(status="proposed", design="order-cancel")
+            for item in block.get("nodes", []) + block.get("edges", []) + block.get("steps", []):
+                item.pop("status", None)
+        self.assertEqual(bp.validate(design)[0], [])
+        text = bp.render_markdown(design)
+        drawn = [line for line in text.splitlines() if re.match(r"\s+n\d+\[|\s+L\d+-*>>", line)]
+        self.assertGreater(len(drawn), 3)
+        self.assertEqual([line for line in drawn if "NEW: " not in line], [])
+
+    def test_the_rows_and_entries_of_a_wholly_new_block_are_marked_in_markdown(self):
+        design = self.load(DESIGN)
+        design["sections"][0]["blocks"] += [
+            {"id": "t", "type": "table", "status": "proposed", "design": "order-cancel", "caption": {"takeaway": "t"},
+             "columns": ["rule"], "rows": [{"id": "r", "cells": ["new row"]}]},
+            {"id": "l", "type": "list", "status": "proposed", "design": "order-cancel", "caption": {"takeaway": "t"},
+             "items": [{"id": "i", "text": "new entry"}]},
+        ]
+        self.assertEqual(bp.validate(design)[0], [])
+        text = bp.render_markdown(design)
+        self.assertIn("| **[PROPOSED]** new row |", text)
+        self.assertIn("- **[PROPOSED]** new entry", text)
 
     def test_a_whole_block_that_is_not_there_cannot_be_changed_or_removed(self):
         for status in ("removed", "changed"):
@@ -851,6 +904,21 @@ class PullRequest(Repo):
         ):
             with self.subTest(command=command[:50]):
                 self.assertIsNone(pr_gate.refusal(command, self.root))
+
+    def test_an_unquoted_heredoc_is_refused_even_when_the_branch_cannot_be_found(self):
+        section = self.section()
+        for command in (
+            f"gh pr edit 12 --body-file - <<EOF\n{section}\nEOF",
+            f'gh pr edit 12 --body "$(cat <<EOF\n{section}\nEOF\n)"',
+        ):
+            with self.subTest(command=command[:40]), mock.patch.object(pr_gate, "branches_of", return_value=None):
+                self.assertIn("Refused", pr_gate.refusal(command, self.root) or "")
+
+    def test_the_digit_of_a_redirect_is_not_a_pull_request_number(self):
+        for command in ("gh pr edit --body new 2>&1", "gh pr edit --body new 2> errors.txt"):
+            with self.subTest(command=command), mock.patch.object(pr_gate, "branches_of") as lookup:
+                self.assertIn("Refused", pr_gate.refusal(command, self.root) or "")
+                lookup.assert_not_called()
 
     def test_a_backslash_ending_a_heredoc_line_does_not_hide_what_follows(self):
         command = "cat <<'EOF' > notes.md\nends in \\\nEOF\ngh pr create -B main --fill"
